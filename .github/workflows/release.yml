@@ -15,6 +15,7 @@ jobs:
       - name: Build Release
         run: |
           # 针对低内存优化编译
+          mkdir -p .cargo
           printf "[profile.release]\nlto = true\ncodegen-units = 1\npanic = 'abort'\nstrip = true\n" > .cargo/config.toml
           cargo build --release
       - name: Package
