@@ -1,0 +1,28 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*' # 当你推送版本号标签（如 v1.0.1）时触发自动发布
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build Release
+        run: |
+          # 针对低内存优化编译
+          printf "[profile.release]\nlto = true\ncodegen-units = 1\npanic = 'abort'\nstrip = true\n" > .cargo/config.toml
+          cargo build --release
+      - name: Package
+        run: |
+          mkdir -p release
+          cp target/release/icon-hub release/
+          tar -czf icon-hub-linux-amd64.tar.gz -C release icon-hub
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: icon-hub-linux-amd64.tar.gz
