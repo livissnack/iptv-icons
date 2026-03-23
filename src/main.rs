@@ -13,8 +13,9 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader;
 use quick_xml::writer::Writer;
 use serde::{Deserialize, Serialize};
-use std::io::Cursor; // 删除了 Write
-// 删除了 UdpSocket
+use std::io::{Cursor, Write};
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use std::path::Path as StdPath;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,6 +28,7 @@ use tower_http::cors::CorsLayer;
 struct AppState {
     cache: Cache<String, Bytes>,           // 图片内容缓存
     xml_cache: Cache<String, String>,      // 注入后的 XML 缓存
+    gz_cache: Cache<String, Bytes>,
     structured_epg: Cache<String, Vec<EpgProgram>>, // 结构化频道 JSON 缓存
     server_port: u16,                      // 运行时端口
 }
@@ -138,6 +140,55 @@ async fn refresh_structured_cache(state: Arc<AppState>, xml: &str) {
 
 // --- 路由 ---
 
+async fn get_epg_xml_gz(headers: header::HeaderMap, State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let host = get_host(&headers, state.server_port);
+
+    // 1. 检查压缩缓存
+    if let Some(cached_gz) = state.gz_cache.get(&host).await {
+        return build_gz_response(cached_gz);
+    }
+
+    // 2. 获取原始 XML（从缓存或远程）
+    let xml_content = if let Some(cached_xml) = state.xml_cache.get(&host).await {
+        cached_xml
+    } else {
+        match fetch_and_process_epg(host.clone()).await {
+            Ok(xml) => {
+                state.xml_cache.insert(host.clone(), xml.clone()).await;
+                let s_clone = Arc::clone(&state);
+                let x_clone = xml.clone();
+                tokio::spawn(async move { refresh_structured_cache(s_clone, &x_clone).await; });
+                xml
+            }
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        }
+    };
+
+    // 3. 在线程池中执行压缩
+    let gz_result = tokio::task::spawn_blocking(move || {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(xml_content.as_bytes()).ok()?;
+        encoder.finish().ok().map(Bytes::from)
+    }).await.unwrap();
+
+    if let Some(data) = gz_result {
+        state.gz_cache.insert(host, data.clone()).await;
+        build_gz_response(data)
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, "Gzip compression failed").into_response()
+    }
+}
+
+// 辅助函数：构建 Gzip 响应头
+fn build_gz_response(data: Bytes) -> Response {
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/gzip")
+        .header(header::CONTENT_DISPOSITION, "attachment; filename=\"epg.xml.gz\"")
+        .body(Body::from(data))
+        .unwrap()
+        .into_response()
+}
+
 async fn get_epg_xml(headers: header::HeaderMap, State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let host = get_host(&headers, state.server_port);
     if let Some(cached) = state.xml_cache.get(&host).await { return ([(header::CONTENT_TYPE, "application/xml")], cached).into_response(); }
@@ -164,7 +215,7 @@ async fn get_channel_epg(Path(ch): Path<String>, State(state): State<Arc<AppStat
 
 async fn clear_cache_handler(State(state): State<Arc<AppState>>, Json(payload): Json<ClearCacheRequest>) -> impl IntoResponse {
     match payload.target.as_str() {
-        "xml" => { state.xml_cache.invalidate_all(); state.structured_epg.invalidate_all(); }
+        "xml" => { state.xml_cache.invalidate_all(); state.gz_cache.invalidate_all(); state.structured_epg.invalidate_all(); }
         "logo" => state.cache.invalidate_all(),
         "all" => { state.xml_cache.invalidate_all(); state.cache.invalidate_all(); state.structured_epg.invalidate_all(); }
         _ => return (StatusCode::BAD_REQUEST, "Invalid target").into_response(),
@@ -241,11 +292,13 @@ async fn main() {
 
     let cache = Cache::builder().max_capacity(500).time_to_idle(Duration::from_secs(43200)).build();
     let xml_cache = Cache::builder().max_capacity(10).time_to_live(Duration::from_secs(3600)).build();
+    let gz_cache = Cache::builder().max_capacity(10).time_to_live(Duration::from_secs(3600)).build();
     let structured_epg = Cache::builder().max_capacity(2000).time_to_live(Duration::from_secs(3600)).build();
 
     let state = Arc::new(AppState {
         cache,
         xml_cache,
+        gz_cache,
         structured_epg,
         server_port: port
     });
@@ -258,6 +311,7 @@ async fn main() {
         .route("/logo/:name", get(get_logo))
         .route("/upload", post(upload_handler))
         .route("/epg.xml", get(get_epg_xml))
+        .route("/epg.xml.gz", get(get_epg_xml_gz))
         .route("/epg/:channel", get(get_channel_epg))
         .with_state(state)
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
