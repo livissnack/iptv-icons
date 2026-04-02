@@ -17,7 +17,7 @@ fn get_cache() -> &'static DashMap<String, (String, u64)> {
 
 fn get_huya_url(room_id: &str, cdn: &str, format: &str) -> Option<String> {
     let client = reqwest::blocking::Client::new();
-    let url = format!("https://mp.huya.com/cache1.php?m=Live&do=profileRoom&roomid={}", room_id);
+    let url = format!("https://mp.huya.com/cache.php?m=Live&do=profileRoom&roomid={}", room_id);
 
     let resp: serde_json::Value = client.get(url).send().ok()?.json().ok()?;
     let stream_info = &resp["data"]["stream"]["baseSteamInfoList"][0];
