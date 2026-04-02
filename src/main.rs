@@ -1,3 +1,4 @@
+mod iptv;
 use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, State},
     http::{header, StatusCode},
@@ -313,6 +314,7 @@ async fn main() {
         .route("/epg.xml", get(get_epg_xml))
         .route("/epg.xml.gz", get(get_epg_xml_gz))
         .route("/epg/:channel", get(get_channel_epg))
+        .route("/huya/:id", get(iptv::huya_handler))
         .with_state(state)
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(CompressionLayer::new())
